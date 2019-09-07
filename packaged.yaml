@@ -1,0 +1,238 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: ReviveChat template file.
+Parameters:
+  TableName:
+    Type: String
+    Default: ReviveChatDB
+    Description: (Required) The name of the new DynamoDB to store connection identifiers
+      for each connected clients. Minimum 3 characters
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: ^[A-Za-z_]+$
+    ConstraintDescription: Required. Can be characters and underscore only. No numbers
+      or special characters allowed.
+Resources:
+  ReviveChatSocket:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: ReviveChatSocket
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.message
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Ref: ReviveChatSocket
+      RouteKey: $connect
+      AuthorizationType: NONE
+      OperationName: ConnectRoute
+      Target:
+        Fn::Join:
+        - /
+        - - integrations
+          - Ref: ConnectInteg
+  ConnectInteg:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId:
+        Ref: ReviveChatSocket
+      Description: Connect Integration
+      IntegrationType: AWS_PROXY
+      IntegrationUri:
+        Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OnConnect.Arn}/invocations
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Ref: ReviveChatSocket
+      RouteKey: $disconnect
+      AuthorizationType: NONE
+      OperationName: DisconnectRoute
+      Target:
+        Fn::Join:
+        - /
+        - - integrations
+          - Ref: DisconnectInteg
+  DisconnectInteg:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId:
+        Ref: ReviveChatSocket
+      Description: Disconnect Integration
+      IntegrationType: AWS_PROXY
+      IntegrationUri:
+        Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OnDisconnect.Arn}/invocations
+  SendRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Ref: ReviveChatSocket
+      RouteKey: sendmessage
+      AuthorizationType: NONE
+      OperationName: SendRoute
+      Target:
+        Fn::Join:
+        - /
+        - - integrations
+          - Ref: SendInteg
+  SendInteg:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId:
+        Ref: ReviveChatSocket
+      Description: Send Integration
+      IntegrationType: AWS_PROXY
+      IntegrationUri:
+        Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SendMessage.Arn}/invocations
+  Deployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+    - ConnectRoute
+    - SendRoute
+    - DisconnectRoute
+    Properties:
+      ApiId:
+        Ref: ReviveChatSocket
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      StageName: Prod
+      Description: Prod Stage
+      DeploymentId:
+        Ref: Deployment
+      ApiId:
+        Ref: ReviveChatSocket
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: connection_id
+        AttributeType: S
+      KeySchema:
+      - AttributeName: connection_id
+        KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      SSESpecification:
+        SSEEnabled: true
+      TableName:
+        Ref: TableName
+  OnConnect:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://revive-chat-bucket/1a7fa803a18d6adb128b88734a477765
+      Handler: app.handler
+      MemorySize: 256
+      Runtime: nodejs10.x
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Ref: TableName
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: TableName
+  OnConnectPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+    - ReviveChatSocket
+    - OnConnect
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: OnConnect
+      Principal: apigateway.amazonaws.com
+  OnDisconnect:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://revive-chat-bucket/9c4d7b62d7e8c31d61ae4b33dbbb1717
+      Handler: app.handler
+      MemorySize: 256
+      Runtime: nodejs10.x
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Ref: TableName
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: TableName
+  OnDisconnectPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+    - ReviveChatSocket
+    - OnDisconnect
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: OnDisconnect
+      Principal: apigateway.amazonaws.com
+  SendMessage:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://revive-chat-bucket/e90061d36f9cdb7fffb35b659aaeb730
+      Handler: app.handler
+      MemorySize: 256
+      Runtime: nodejs10.x
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Ref: TableName
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: TableName
+      - Statement:
+        - Effect: Allow
+          Action:
+          - execute-api:ManageConnections
+          Resource:
+          - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ReviveChatSocket}/*
+  SendMessagePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+    - ReviveChatSocket
+    - SendMessage
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: SendMessage
+      Principal: apigateway.amazonaws.com
+Outputs:
+  ConnectionsTableArn:
+    Description: Connections table ARN
+    Value:
+      Fn::GetAtt:
+      - ConnectionsTable
+      - Arn
+  OnConnectArn:
+    Description: OnConnect function ARN
+    Value:
+      Fn::GetAtt:
+      - OnConnect
+      - Arn
+  OnDisconnectArn:
+    Description: OnDisconnect function ARN
+    Value:
+      Fn::GetAtt:
+      - OnDisconnect
+      - Arn
+  SendMessageArn:
+    Description: SendMessage function ARN
+    Value:
+      Fn::GetAtt:
+      - SendMessage
+      - Arn
+  WebSocketURI:
+    Description: The WSS Protocol URI to connect to
+    Value:
+      Fn::Join:
+      - ''
+      - - wss://
+        - Ref: ReviveChatSocket
+        - .execute-api.
+        - Ref: AWS::Region
+        - .amazonaws.com/
+        - Ref: Stage
